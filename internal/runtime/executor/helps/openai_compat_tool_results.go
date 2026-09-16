@@ -160,3 +160,26 @@ func isOpenAIImageToolResultPart(item gjson.Result) bool {
 	}
 	return item.Get("image_url").Exists() || item.Get("input_image").Exists()
 }
+
+// NormalizeClaudeToolResultsTextOnly removes unsupported tool-result images before
+// translation merges them with ordinary user content. This addresses the defect
+// reported in upstream PR #5754 without relying on its ambiguous relay notice.
+func NormalizeClaudeToolResultsTextOnly(payload []byte) []byte {
+	out := payload
+	for messageIndex, message := range gjson.GetBytes(payload, "messages").Array() {
+		if message.Get("role").String() != "user" || !message.Get("content").IsArray() {
+			continue
+		}
+		for partIndex, part := range message.Get("content").Array() {
+			content := part.Get("content")
+			if part.Get("type").String() != "tool_result" || !content.Exists() || content.Type == gjson.String {
+				continue
+			}
+			path := fmt.Sprintf("messages.%d.content.%d.content", messageIndex, partIndex)
+			if updated, errSet := sjson.SetBytes(out, path, flattenOpenAIToolResultContent(content)); errSet == nil {
+				out = updated
+			}
+		}
+	}
+	return out
+}

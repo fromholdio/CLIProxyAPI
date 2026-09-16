@@ -109,3 +109,40 @@ func TestShouldNormalizeOpenAIToolResultsForModel(t *testing.T) {
 		t.Fatal("nil compatibility config unexpectedly enabled normalization")
 	}
 }
+
+// Source boundaries must survive even when direct and tool-returned images match.
+func TestNormalizeClaudeToolResultsTextOnly(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"one","name":"inspect","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"one","is_error":true,"content":[{"type":"text","text":"caption"},{"type":"image","source":{"type":"base64","data":"AA=="}},{"type":"custom","value":1}]},{"type":"image","source":{"type":"base64","data":"AA=="}},{"type":"text","text":"Images returned by the preceding tool call(s):"},{"type":"tool_result","tool_use_id":"two","content":[{"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}]}]}]}`)
+	got := NormalizeClaudeToolResultsTextOnly(input)
+	if !gjson.ValidBytes(got) {
+		t.Fatal("invalid JSON")
+	}
+	if content := gjson.GetBytes(got, "messages.1.content.0.content"); content.Type != gjson.String || content.String() != "caption\n\n[image omitted: unsupported by upstream]\n\n{\"type\":\"custom\",\"value\":1}" {
+		t.Errorf("first tool result = %s", content.Raw)
+	}
+	if content := gjson.GetBytes(got, "messages.1.content.3.content"); content.Type != gjson.String || content.String() != "[image omitted: unsupported by upstream]" {
+		t.Errorf("second tool result = %s", content.Raw)
+	}
+	for _, path := range []string{"messages.0", "messages.1.role", "messages.1.content.0.tool_use_id", "messages.1.content.0.is_error", "messages.1.content.1", "messages.1.content.2", "messages.1.content.3.tool_use_id", "messages.#", "messages.1.content.#"} {
+		if gjson.GetBytes(got, path).Raw != gjson.GetBytes(input, path).Raw {
+			t.Errorf("unrelated field changed: %s", path)
+		}
+	}
+	if again := NormalizeClaudeToolResultsTextOnly(got); string(again) != string(got) {
+		t.Error("not idempotent")
+	}
+}
+
+func TestNormalizeClaudeToolResultsTextOnlyLeavesOrdinaryContent(t *testing.T) {
+	for _, input := range []string{
+		`{}`, `{"messages":null}`,
+		`{"messages":[{"role":"user","content":"ordinary text"}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"one","content":"already text"}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"one"}]}]}`,
+		`{"messages":[{"role":"user","content":[{"type":"text","text":"Images returned by the preceding tool call(s):"},{"type":"image","source":{"type":"base64","data":"AA=="}}]}]}`,
+	} {
+		if got := NormalizeClaudeToolResultsTextOnly([]byte(input)); string(got) != input {
+			t.Errorf("ordinary content changed: %s", got)
+		}
+	}
+}
